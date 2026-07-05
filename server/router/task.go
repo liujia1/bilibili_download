@@ -190,6 +190,18 @@ func stopAllTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	task.GlobalTaskMux.Unlock()
 
+	// 设置全局停止标志，阻止后续等待任务继续
+	task.GlobalStoppedMux.Lock()
+	task.GlobalStopped = true
+	task.GlobalStoppedMux.Unlock()
+
+	// 更新数据库中 waiting 任务的状态为 error
+	db := util.MustGetDB()
+	defer db.Close()
+	util.SqliteLock.Lock()
+	db.Exec(`UPDATE "task" SET "status" = 'error' WHERE "status" = 'waiting'`)
+	util.SqliteLock.Unlock()
+
 	util.Res{Success: true, Message: "停止全部任务成功"}.Write(w)
 }
 

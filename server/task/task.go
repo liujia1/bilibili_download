@@ -81,6 +81,10 @@ var GlobalTaskMux = &sync.Mutex{}
 var GlobalDownloadSem = util.NewSemaphore(5)
 var GlobalMergeSem = util.NewSemaphore(3)
 
+/** 全局停止标志 */
+var GlobalStopped = false
+var GlobalStoppedMux = &sync.Mutex{}
+
 func (task *Task) Create(db *sql.DB) error {
 	util.SqliteLock.Lock()
 	result, err := db.Exec(`INSERT INTO "task" ("bvid", "cid", "format", "title", "owner", "cover", "status", "folder", "duration", "download_type", "audio", "video")
@@ -110,6 +114,13 @@ func (task *Task) Create(db *sql.DB) error {
 
 // Create 创建任务，并将任务加入全局任务列表
 func (task *Task) Start() {
+	GlobalStoppedMux.Lock()
+	if GlobalStopped {
+		GlobalStoppedMux.Unlock()
+		return
+	}
+	GlobalStoppedMux.Unlock()
+
 	if task.DownloadType == "" {
 		task.DownloadType = "merge"
 	}
