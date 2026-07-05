@@ -181,6 +181,18 @@ func deleteAllTasks(w http.ResponseWriter, r *http.Request) {
 	util.Res{Success: true, Message: "删除全部成功"}.Write(w)
 }
 
+func stopAllTasks(w http.ResponseWriter, r *http.Request) {
+	task.GlobalTaskMux.Lock()
+	for _, t := range task.GlobalTaskList {
+		if t.Status == "running" && t.Cancel != nil {
+			t.Cancel()
+		}
+	}
+	task.GlobalTaskMux.Unlock()
+
+	util.Res{Success: true, Message: "停止全部任务成功"}.Write(w)
+}
+
 func redownloadTask(w http.ResponseWriter, r *http.Request) {
 	taskIDStr := r.FormValue("id")
 	taskID, err := strconv.Atoi(taskIDStr)

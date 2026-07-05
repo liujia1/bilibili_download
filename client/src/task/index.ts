@@ -1,7 +1,7 @@
 import van, { State } from 'vanjs-core'
 import { Route, goto, now } from 'vanjs-router'
 import { checkLogin, GLOBAL_HAS_LOGIN, GLOBAL_HIDE_PAGE, ResJSON, VanComponent } from '../mixin'
-import { deleteTask, deleteAllTasks, getActiveTask, getTaskList, redownloadTask, showFile } from './data'
+import { deleteTask, deleteAllTasks, stopAllTasks, getActiveTask, getTaskList, redownloadTask, showFile } from './data'
 import { TaskInDB, TaskStatus } from '../work/type'
 import { LoadingBox } from '../view'
 import { PlayerModalComp } from './playerModal'
@@ -99,11 +99,25 @@ export class TaskRoute implements VanComponent {
             Loader() {
                 return div(
                     () => _that.loading.val ? LoadingBox() : '',
-                    div({ class: 'd-flex justify-content-end mb-2', hidden: _that.loading.val },
+                    div({ class: 'd-flex justify-content-end mb-2 gap-2', hidden: _that.loading.val },
+                        van.tags.button({
+                            class: 'btn btn-sm btn-outline-warning',
+                            onclick() {
+                                if (!confirm('确定要停止所有正在运行的任务吗？')) return
+                                stopAllTasks().catch(error => {
+                                    alert(error.message)
+                                })
+                            }
+                        }, '停止全部任务'),
                         van.tags.button({
                             class: 'btn btn-sm btn-outline-danger',
                             onclick() {
                                 if (!confirm('确定要删除所有历史记录吗？此操作不可恢复。')) return
+                                const hasRunning = _that.taskList.val.some(t => t.statusState.val === 'running' || t.statusState.val === 'waiting')
+                                if (hasRunning) {
+                                    alert('请先停止所有正在进行的任务')
+                                    return
+                                }
                                 deleteAllTasks().then(() => {
                                     _that.taskList.val = []
                                 }).catch(error => {

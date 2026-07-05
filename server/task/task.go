@@ -2,6 +2,7 @@ package task
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"errors"
@@ -69,6 +70,10 @@ type Task struct {
 	AudioProgress float64 `json:"audioProgress"`
 	VideoProgress float64 `json:"videoProgress"`
 	MergeProgress float64 `json:"mergeProgress"`
+	/** 用于取消任务 */
+	Cancel context.CancelFunc `json:"-"`
+	/** context */
+	Ctx context.Context `json:"-"`
 }
 
 var GlobalTaskList = []*Task{}
@@ -114,6 +119,10 @@ func (task *Task) Start() {
 	db := util.MustGetDB()
 	defer db.Close()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	task.Ctx = ctx
+	task.Cancel = cancel
+
 	// 检查目标文件是否已存在，如果存在则跳过下载
 	if fileExists := checkFileExists(task.Folder, task.Title, task.Format, task.DownloadType); fileExists != "" {
 		log.Printf("文件已存在，跳过下载 (任务ID: %d): %s", task.ID, fileExists)
@@ -133,7 +142,7 @@ func (task *Task) Start() {
 
 	if task.DownloadType == "audio" {
 		// 仅音频模式：只下载音频，重命名音频文件为输出文件
-		err = DownloadMedia(client, task.Audio, task, "audio")
+		err = DownloadMedia(ctx, client, task.Audio, task, "audio")
 		if err != nil {
 			GlobalDownloadSem.Release()
 			task.UpdateStatus(db, "error", fmt.Errorf("DownloadMedia: %v", err))
@@ -155,7 +164,7 @@ func (task *Task) Start() {
 		return
 	} else if task.DownloadType == "video" {
 		// 仅视频模式：只下载视频，重命名视频文件为输出文件
-		err = DownloadMedia(client, task.Video, task, "video")
+		err = DownloadMedia(ctx, client, task.Video, task, "video")
 		if err != nil {
 			GlobalDownloadSem.Release()
 			task.UpdateStatus(db, "error", fmt.Errorf("DownloadMedia: %v", err))
@@ -177,13 +186,13 @@ func (task *Task) Start() {
 		return
 	} else {
 		// 合并模式：下载音频和视频，然后合并
-		err = DownloadMedia(client, task.Audio, task, "audio")
+		err = DownloadMedia(ctx, client, task.Audio, task, "audio")
 		if err != nil {
 			GlobalDownloadSem.Release()
 			task.UpdateStatus(db, "error", fmt.Errorf("DownloadMedia: %v", err))
 			return
 		}
-		err = DownloadMedia(client, task.Video, task, "video")
+		err = DownloadMedia(ctx, client, task.Video, task, "video")
 		if err != nil {
 			GlobalDownloadSem.Release()
 			task.UpdateStatus(db, "error", fmt.Errorf("DownloadMedia: %v", err))
@@ -195,7 +204,7 @@ func (task *Task) Start() {
 		videoPath := filepath.Join(task.Folder, strconv.FormatInt(task.ID, 10)+".video")
 		audioPath := filepath.Join(task.Folder, strconv.FormatInt(task.ID, 10)+".audio")
 		GlobalMergeSem.Acquire()
-		err = task.MergeMedia(outputPath, videoPath, audioPath)
+		err = task.MergeMedia(ctx, outputPath, videoPath, audioPath)
 		if err != nil {
 			GlobalMergeSem.Release()
 			task.UpdateStatus(db, "error", fmt.Errorf("task.MergeMedia: %v", err))
@@ -223,7 +232,7 @@ func (task *Task) Start() {
 }
 
 // 合并音视频
-func (task *Task) MergeMedia(outputPath string, inputPaths ...string) error {
+func (task *Task) MergeMedia(ctx context.Context, outputPath string, inputPaths ...string) error {
 	inputs := []string{}
 	for _, path := range inputPaths {
 		inputs = append(inputs, "-i", path)
@@ -253,6 +262,12 @@ func (task *Task) MergeMedia(outputPath string, inputPaths ...string) error {
 	outTimeRegex := regexp.MustCompile(`out_time_ms=(\d+)`) // 毫秒
 
 	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			cmd.Process.Kill()
+			return ctx.Err()
+		default:
+		}
 		line := scanner.Text()
 		match := outTimeRegex.FindStringSubmatch(line)
 		if len(match) == 2 {
@@ -321,10 +336,15 @@ func (task *Task) UpdateStatus(db *sql.DB, status TaskStatus, errs ...error) err
 	return err
 }
 
-func DownloadMedia(client *bilibili.BiliClient, _url string, task *Task, mediaType string) error {
+func DownloadMedia(ctx context.Context, client *bilibili.BiliClient, _url string, task *Task, mediaType string) error {
 	var resp *http.Response
 	var err error
 	for i := 0; i < 5; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		resp, err = client.SimpleGET(_url, nil)
 		if err == nil {
 			break
@@ -348,6 +368,12 @@ func DownloadMedia(client *bilibili.BiliClient, _url string, task *Task, mediaTy
 	reader := io.TeeReader(resp.Body, file)
 	buf := make([]byte, 1024)
 	for {
+		select {
+		case <-ctx.Done():
+			resp.Body.Close()
+			return ctx.Err()
+		default:
+		}
 		n, err := reader.Read(buf)
 		if err != nil && err != io.EOF {
 			return err
