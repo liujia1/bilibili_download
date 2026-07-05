@@ -1,7 +1,7 @@
 import van, { State } from 'vanjs-core'
 import { Route, goto, now } from 'vanjs-router'
 import { checkLogin, GLOBAL_HAS_LOGIN, GLOBAL_HIDE_PAGE, ResJSON, VanComponent } from '../mixin'
-import { deleteTask, getActiveTask, getTaskList, showFile } from './data'
+import { deleteTask, deleteAllTasks, getActiveTask, getTaskList, redownloadTask, showFile } from './data'
 import { TaskInDB, TaskStatus } from '../work/type'
 import { LoadingBox } from '../view'
 import { PlayerModalComp } from './playerModal'
@@ -16,6 +16,9 @@ export class TaskRoute implements VanComponent {
     playerModalComp = new PlayerModalComp()
 
     loading = van.state(false)
+    /** 刷新定时器 */
+    refreshTimer: number | undefined
+    refreshHelper: number | undefined
 
     taskList: State<(TaskInDB & {
         /** 音频下载进度百分比 */
@@ -30,11 +33,63 @@ export class TaskRoute implements VanComponent {
         opening: State<boolean>
         /** 是否正在删除 */
         deleting: State<boolean>
+        /** 是否正在重新下载 */
+        redownloading: State<boolean>
     })[]> = van.state([])
 
     constructor() {
 
         this.element = this.Root()
+    }
+
+    /** 启动刷新定时器 */
+    startRefreshTimer() {
+        const _that = this
+        const refresh = async () => {
+            const activeTaskList = await getActiveTask()
+            if (!activeTaskList) return false
+            setTimeout(() => {
+                _that.loading.val = false
+            }, 200)
+
+            _that.taskList.val.forEach(taskInDB => {
+                activeTaskList.forEach(task => {
+                    if (taskInDB.id == task.id) {
+                        taskInDB.audioProgress.val = task.audioProgress
+                        taskInDB.videoProgress.val = task.videoProgress
+                        taskInDB.mergeProgress.val = task.mergeProgress
+                        taskInDB.statusState.val = task.status
+                    }
+                })
+            })
+            if (activeTaskList.filter(task => task.status == 'running').length == 0) {
+                _that.stopRefreshTimer()
+            }
+            return true
+        }
+
+        refresh()
+
+        _that.refreshTimer = setInterval(() => {
+            refresh()
+        }, 1000)
+        _that.refreshHelper = setInterval(() => {
+            if (now.val.split('/')[0] != 'task') {
+                _that.stopRefreshTimer()
+            }
+        })
+    }
+
+    /** 停止刷新定时器 */
+    stopRefreshTimer() {
+        if (this.refreshTimer) {
+            clearInterval(this.refreshTimer)
+            this.refreshTimer = undefined
+        }
+        if (this.refreshHelper) {
+            clearInterval(this.refreshHelper)
+            this.refreshHelper = undefined
+        }
     }
 
     Root() {
@@ -44,6 +99,19 @@ export class TaskRoute implements VanComponent {
             Loader() {
                 return div(
                     () => _that.loading.val ? LoadingBox() : '',
+                    div({ class: 'd-flex justify-content-end mb-2', hidden: _that.loading.val },
+                        van.tags.button({
+                            class: 'btn btn-sm btn-outline-danger',
+                            onclick() {
+                                if (!confirm('确定要删除所有历史记录吗？此操作不可恢复。')) return
+                                deleteAllTasks().then(() => {
+                                    _that.taskList.val = []
+                                }).catch(error => {
+                                    alert(error.message)
+                                })
+                            }
+                        }, '删除全部历史记录')
+                    ),
                     () => div({ class: 'list-group', hidden: _that.loading.val },
                         _that.taskList.val.map(task => {
                             const ext = task.downloadType === 'audio' ? '.m4a' : '.mp4'
@@ -141,6 +209,48 @@ export class TaskRoute implements VanComponent {
                                         && task.statusState.val != 'error'
                                         || task.opening.val  // 正在打开文件位置时，不应该显示删除按钮
                                         || task.deleting.val  // 正在删除时，不应该显示删除按钮
+                                        || task.redownloading.val  // 正在重新下载时，不应该显示按钮
+                                },
+                                    div({
+                                        class: 'hover-btn', title: '重新下载',
+                                        onclick() {
+                                            task.redownloading.val = true
+                                            redownloadTask(task.id).then(() => {
+                                                // 重新下载后刷新整个列表
+                                                getTaskList(0, 360).then(list => {
+                                                    if (!list) return
+                                                    _that.taskList.val = list.map(t => ({
+                                                        ...t,
+                                                        audioProgress: van.state(1),
+                                                        videoProgress: van.state(1),
+                                                        mergeProgress: van.state(1),
+                                                        statusState: van.state(t.status),
+                                                        opening: van.state(false),
+                                                        deleting: van.state(false),
+                                                        redownloading: van.state(false)
+                                                    }))
+                                                    // 重新启动刷新定时器
+                                                    _that.startRefreshTimer()
+                                                })
+                                            }).catch(error => {
+                                                task.redownloading.val = false
+                                                alert(error.message)
+                                            })
+                                        }
+                                    },
+                                        task.redownloading.val
+                                            ? div({ class: 'spinner-border spinner-border-sm', role: 'status' },
+                                                span({ class: 'visually-hidden' }, 'Loading...')
+                                            )
+                                            : _that.RedownloadSVG()
+                                    )
+                                ),
+                                div({
+                                    class: 'me-4',
+                                    hidden: task.statusState.val != 'done'
+                                        && task.statusState.val != 'error'
+                                        || task.opening.val  // 正在打开文件位置时，不应该显示删除按钮
+                                        || task.deleting.val  // 正在删除时，不应该显示删除按钮
                                 },
                                     div({
                                         class: 'hover-btn', title: '删除视频',
@@ -177,44 +287,12 @@ export class TaskRoute implements VanComponent {
                         mergeProgress: van.state(1),
                         statusState: van.state(task.status),
                         opening: van.state(false),
-                        deleting: van.state(false)
+                        deleting: van.state(false),
+                        redownloading: van.state(false)
                     }))
 
-                    const refresh = async () => {
-                        const activeTaskList = await getActiveTask()
-                        if (!activeTaskList) return false
-                        setTimeout(() => {
-                            _that.loading.val = false
-                        }, 200)
-
-                        _that.taskList.val.forEach(taskInDB => {
-                            activeTaskList.forEach(task => {
-                                if (taskInDB.id == task.id) {
-                                    taskInDB.audioProgress.val = task.audioProgress
-                                    taskInDB.videoProgress.val = task.videoProgress
-                                    taskInDB.mergeProgress.val = task.mergeProgress
-                                    taskInDB.statusState.val = task.status
-                                }
-                            })
-                        })
-                        if (activeTaskList.filter(task => task.status == 'running').length == 0) {
-                            clearInterval(timer)
-                            clearInterval(helper)
-                        }
-                        return true
-                    }
-
-                    refresh()
-
-                    let timer = setInterval(() => {
-                        refresh()
-                    }, 1000)
-                    let helper = setInterval(() => {
-                        if (now.val.split('/')[0] != 'task') {
-                            clearInterval(helper)
-                            clearInterval(timer)
-                        }
-                    })
+                    // 启动刷新定时器
+                    _that.startRefreshTimer()
                 })
             },
         })
@@ -223,6 +301,13 @@ export class TaskRoute implements VanComponent {
     DeleteSVG() {
         return svg({ style: `width: 1em; height: 1em`, fill: "currentColor", class: "bi bi-trash3", viewBox: "0 0 16 16" },
             path({ "d": "M6.5 1h3a.5.5 0 0 1 .5.5v1H6v-1a.5.5 0 0 1 .5-.5M11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3A1.5 1.5 0 0 0 5 1.5v1H1.5a.5.5 0 0 0 0 1h.538l.853 10.66A2 2 0 0 0 4.885 16h6.23a2 2 0 0 0 1.994-1.84l.853-10.66h.538a.5.5 0 0 0 0-1zm1.958 1-.846 10.58a1 1 0 0 1-.997.92h-6.23a1 1 0 0 1-.997-.92L3.042 3.5zm-7.487 1a.5.5 0 0 1 .528.47l.5 8.5a.5.5 0 0 1-.998.06L5 5.03a.5.5 0 0 1 .47-.53Zm5.058 0a.5.5 0 0 1 .47.53l-.5 8.5a.5.5 0 1 1-.998-.06l.5-8.5a.5.5 0 0 1 .528-.47M8 4.5a.5.5 0 0 1 .5.5v8.5a.5.5 0 0 1-1 0V5a.5.5 0 0 1 .5-.5" }),
+        )
+    }
+
+    RedownloadSVG() {
+        return svg({ style: `width: 1em; height: 1em`, fill: "currentColor", class: "bi bi-arrow-clockwise", viewBox: "0 0 16 16" },
+            path({ "d": "M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.418A6 6 0 1 1 8 2v1z" }),
+            path({ "d": "M8 1a.5.5 0 0 1 .5.5v4a.5.5 0 0 1-1 0v-4A.5.5 0 0 1 8 1z" }),
         )
     }
 

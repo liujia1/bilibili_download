@@ -9,7 +9,9 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
+	"syscall"
 
+	"bilidown/bilibili"
 	"bilidown/task"
 	"bilidown/util"
 )
@@ -114,6 +116,7 @@ func showFile(w http.ResponseWriter, r *http.Request) {
 	case "windows":
 		// Windows 使用 explorer
 		cmd = exec.Command("explorer", "/select,", filePath)
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	case "darwin":
 		// macOS 使用 open
 		cmd = exec.Command("open", "-R", filePath)
@@ -164,4 +167,99 @@ func deleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	util.Res{Success: true, Message: "删除成功"}.Write(w)
+}
+
+func deleteAllTasks(w http.ResponseWriter, r *http.Request) {
+	db := util.MustGetDB()
+	defer db.Close()
+
+	// 一次性清空数据库（不删除文件）
+	util.SqliteLock.Lock()
+	db.Exec(`DELETE FROM "task"`)
+	util.SqliteLock.Unlock()
+
+	util.Res{Success: true, Message: "删除全部成功"}.Write(w)
+}
+
+func redownloadTask(w http.ResponseWriter, r *http.Request) {
+	taskIDStr := r.FormValue("id")
+	taskID, err := strconv.Atoi(taskIDStr)
+	if err != nil {
+		util.Res{Success: false, Message: "参数错误"}.Write(w)
+		return
+	}
+	db := util.MustGetDB()
+	defer db.Close()
+
+	// 获取旧任务数据并删除旧记录（在一次锁操作中完成）
+	util.SqliteLock.Lock()
+	var _task task.TaskInDB
+	var createAt string
+	err = db.QueryRow(`SELECT
+		"id", "bvid", "cid", "format", "title",
+		"owner", "cover", "status", "folder", "duration", "download_type", "create_at", "audio", "video"
+	FROM "task" WHERE "id" = ?`, taskID).Scan(
+		&_task.ID,
+		&_task.Bvid,
+		&_task.Cid,
+		&_task.Format,
+		&_task.Title,
+		&_task.Owner,
+		&_task.Cover,
+		&_task.Status,
+		&_task.Folder,
+		&_task.Duration,
+		&_task.DownloadType,
+		&createAt,
+		&_task.Audio,
+		&_task.Video,
+	)
+	if err != nil {
+		util.SqliteLock.Unlock()
+		util.Res{Success: false, Message: fmt.Sprintf("查询任务失败: %v", err)}.Write(w)
+		return
+	}
+
+	// 删除旧记录
+	db.Exec(`DELETE FROM "task" WHERE "id" = ?`, taskID)
+	util.SqliteLock.Unlock()
+
+	// 删除旧文件（锁已释放）
+	filePath := _task.FilePath()
+	os.Remove(filePath)
+
+	// 获取 SESSDATA
+	sessdata, err := bilibili.GetSessdata(db)
+	if err != nil {
+		util.Res{Success: false, Message: fmt.Sprintf("获取 SESSDATA 失败: %v", err)}.Write(w)
+		return
+	}
+
+	// 重新获取下载 URL（因为 B站 URL 有时效性）
+	client := bilibili.BiliClient{SESSDATA: sessdata}
+	playInfo, err := client.GetPlayInfo(_task.Bvid, _task.Cid)
+	if err != nil {
+		util.Res{Success: false, Message: fmt.Sprintf("获取播放信息失败: %v", err)}.Write(w)
+		return
+	}
+
+	// 更新 Audio 和 Video URL
+	_task.Audio = playInfo.Dash.Audio[0].BaseURL
+	_task.Video = playInfo.Dash.Video[0].BaseURL
+
+	// 创建新任务
+	newTask := task.Task{TaskInDB: _task}
+	newTask.Status = "waiting"
+	newTask.Title = util.FilterFileName(newTask.Title)
+	newTask.ID = 0 // 重置 ID，让 Create 生成新 ID
+
+	err = newTask.Create(db)
+	if err != nil {
+		util.Res{Success: false, Message: fmt.Sprintf("newTask.Create: %v", err)}.Write(w)
+		return
+	}
+
+	// 先返回响应，再启动下载
+	util.Res{Success: true, Message: "重新下载成功"}.Write(w)
+	go newTask.Start()
 }

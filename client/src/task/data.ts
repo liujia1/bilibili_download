@@ -72,3 +72,13 @@ export const deleteTask = async (id: number) => {
     const res = await fetch(`/api/deleteTask?id=${id}`).then(res => res.json()) as ResJSON
     if (!res.success) throw new Error(res.message)
 }
+
+export const deleteAllTasks = async () => {
+    const res = await fetch('/api/deleteAllTasks').then(res => res.json()) as ResJSON
+    if (!res.success) throw new Error(res.message)
+}
+
+export const redownloadTask = async (id: number) => {
+    const res = await fetch(`/api/redownloadTask?id=${id}`).then(res => res.json()) as ResJSON
+    if (!res.success) throw new Error(res.message)
+}

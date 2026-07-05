@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"syscall"
 	"time"
 
 	"bilidown/router"
@@ -19,8 +20,8 @@ import (
 )
 
 const (
-	HTTP_PORT = 8098      // 限定 HTTP 服务器端口
-	HTTP_HOST = ""        // 限定 HTTP 服务器主机
+	HTTP_PORT = 8098     // 限定 HTTP 服务器端口
+	HTTP_HOST = ""       // 限定 HTTP 服务器主机
 	VERSION   = "v2.1.1" // 软件版本号，将影响托盘标题显示
 )
 
@@ -80,6 +81,7 @@ func openBrowser(url string) {
 	switch runtime.GOOS {
 	case "windows":
 		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	case "darwin":
 		cmd = exec.Command("open", url)
 	case "linux":
@@ -210,6 +212,9 @@ func addMissingColumns(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE "task" ADD COLUMN "download_type" TEXT DEFAULT 'merge'`)
 	// 将现有记录中的NULL值更新为默认值'merge'
 	_, _ = db.Exec(`UPDATE "task" SET "download_type" = 'merge' WHERE "download_type" IS NULL`)
+	// 添加 audio 和 video 列（用于重新下载）
+	_, _ = db.Exec(`ALTER TABLE "task" ADD COLUMN "audio" TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE "task" ADD COLUMN "video" TEXT DEFAULT ''`)
 	util.SqliteLock.Unlock()
 
 	// 忽略错误，因为列可能已经存在
@@ -217,10 +222,10 @@ func addMissingColumns(db *sql.DB) error {
 	return nil
 }
 
-// initHistoryTask 将上一次程序运行时未完成的任务进度全部变为 error
+// initHistoryTask 启动时清空所有历史任务
 func initHistoryTask(db *sql.DB) error {
 	util.SqliteLock.Lock()
-	_, err := db.Exec(`UPDATE "task" SET "status" = 'error' WHERE "status" IN ('waiting', 'running')`)
+	_, err := db.Exec(`DELETE FROM "task"`)
 	util.SqliteLock.Unlock()
 	return err
 }

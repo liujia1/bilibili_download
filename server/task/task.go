@@ -13,9 +13,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"bilidown/bilibili"
@@ -71,13 +73,13 @@ type Task struct {
 
 var GlobalTaskList = []*Task{}
 var GlobalTaskMux = &sync.Mutex{}
-var GlobalDownloadSem = util.NewSemaphore(3)
+var GlobalDownloadSem = util.NewSemaphore(5)
 var GlobalMergeSem = util.NewSemaphore(3)
 
 func (task *Task) Create(db *sql.DB) error {
 	util.SqliteLock.Lock()
-	result, err := db.Exec(`INSERT INTO "task" ("bvid", "cid", "format", "title", "owner", "cover", "status", "folder", "duration", "download_type")
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	result, err := db.Exec(`INSERT INTO "task" ("bvid", "cid", "format", "title", "owner", "cover", "status", "folder", "duration", "download_type", "audio", "video")
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		task.Bvid,
 		task.Cid,
 		task.Format,
@@ -88,6 +90,8 @@ func (task *Task) Create(db *sql.DB) error {
 		task.Folder,
 		task.Duration,
 		task.DownloadType,
+		task.Audio,
+		task.Video,
 	)
 	util.SqliteLock.Unlock()
 	if err != nil {
@@ -109,6 +113,14 @@ func (task *Task) Start() {
 	GlobalTaskMux.Unlock()
 	db := util.MustGetDB()
 	defer db.Close()
+
+	// 检查目标文件是否已存在，如果存在则跳过下载
+	if fileExists := checkFileExists(task.Folder, task.Title, task.Format, task.DownloadType); fileExists != "" {
+		log.Printf("文件已存在，跳过下载 (任务ID: %d): %s", task.ID, fileExists)
+		task.UpdateStatus(db, "done")
+		return
+	}
+
 	sessdata, err := bilibili.GetSessdata(db)
 	if err != nil {
 		task.UpdateStatus(db, "error", fmt.Errorf("bilibili.GetSessdata: %v", err))
@@ -223,6 +235,9 @@ func (task *Task) MergeMedia(outputPath string, inputPaths ...string) error {
 	}
 
 	cmd := exec.Command(ffmpegPath, append(inputs, "-c:v", "copy", "-c:a", "copy", "-progress", "pipe:1", "-strict", "-2", outputPath)...)
+	if runtime.GOOS == "windows" {
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -372,12 +387,36 @@ func newProgressBar(total int64) *progressBar {
 	}
 }
 
+// checkFileExists 检查文件夹中是否存在匹配标题、清晰度和类型的文件
+func checkFileExists(folder string, title string, format common.MediaFormat, downloadType string) string {
+	ext := ".mp4"
+	if downloadType == "audio" {
+		ext = ".m4a"
+	}
+
+	files, err := os.ReadDir(folder)
+	if err != nil {
+		return ""
+	}
+
+	for _, f := range files {
+		if f.IsDir() {
+			continue
+		}
+		name := f.Name()
+		if strings.HasPrefix(name, title+" ") && strings.HasSuffix(name, ext) {
+			return filepath.Join(folder, name)
+		}
+	}
+	return ""
+}
+
 func GetTaskList(db *sql.DB, page int, pageSize int) ([]TaskInDB, error) {
 	tasks := []TaskInDB{}
 	util.SqliteLock.Lock()
 	rows, err := db.Query(`SELECT
 		"id", "bvid", "cid", "format", "title",
-		"owner", "cover", "status", "folder", "duration", "download_type", "create_at"
+		"owner", "cover", "status", "folder", "duration", "download_type", "create_at", "audio", "video"
 	FROM "task" ORDER BY "id" DESC LIMIT ?, ?`,
 		page*pageSize, pageSize,
 	)
@@ -403,6 +442,8 @@ func GetTaskList(db *sql.DB, page int, pageSize int) ([]TaskInDB, error) {
 			&task.Duration,
 			&task.DownloadType,
 			&createAt,
+			&task.Audio,
+			&task.Video,
 		)
 		if err != nil {
 			return nil, err
@@ -429,7 +470,7 @@ func GetTask(db *sql.DB, taskID int) (*TaskInDB, error) {
 	util.SqliteLock.Lock()
 	err := db.QueryRow(`SELECT
 		"id", "bvid", "cid", "format", "title",
-		"owner", "cover", "status", "folder", "duration", "download_type", "create_at"
+		"owner", "cover", "status", "folder", "duration", "download_type", "create_at", "audio", "video"
 	FROM "task" WHERE "id" = ?`,
 		taskID,
 	).Scan(
@@ -445,6 +486,8 @@ func GetTask(db *sql.DB, taskID int) (*TaskInDB, error) {
 		&task.Duration,
 		&task.DownloadType,
 		&createAt,
+		&task.Audio,
+		&task.Video,
 	)
 	util.SqliteLock.Unlock()
 	if err != nil {
@@ -484,6 +527,9 @@ func (task *Task) addMetadata(filePath string) error {
 		"-y",
 		tempPath,
 	)
+	if runtime.GOOS == "windows" {
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	}
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {

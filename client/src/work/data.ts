@@ -45,7 +45,7 @@ export const getPlayInfo = async (bvid: string, cid: number, controller: AbortCo
 }
 
 export const createTask = async (tasks: TaskInitData[]): Promise<ResJSON> => {
-    const { signal, timer } = timeoutController()
+    const { signal, timer } = timeoutController(60000)
 
     const res = await fetch('/api/createTask', {
         method: 'POST',

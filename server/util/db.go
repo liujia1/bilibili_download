@@ -143,6 +143,12 @@ func MustGetDB(path ...string) *sql.DB {
 	} else {
 		pathStr = path[0]
 	}
+	// 添加 busy_timeout 参数，避免 SQLITE_BUSY 错误
+	if !strings.Contains(pathStr, "?") {
+		pathStr += "?_busy_timeout=5000"
+	} else if !strings.Contains(pathStr, "_busy_timeout") {
+		pathStr += "&_busy_timeout=5000"
+	}
 	db, err := sql.Open("sqlite", pathStr)
 	if err != nil {
 		log.Fatalln("sql.Open:", err)
